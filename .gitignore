@@ -7,3 +7,11 @@
 .env.test.local
 .env.production.local
 .envrc
+
+# Entorno virtual de Python
+.venv/
+venv/
+*.pyc
+
+# Archivos de sistema operativo (opcional pero recomendado)
+.DS_Store
