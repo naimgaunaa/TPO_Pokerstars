@@ -61,16 +61,12 @@ def get_neo4j_driver():
         print(f"❌ ERROR Neo4j: {e}")
         return None
 
-# ================
-#   INPUT HELPER
-# ================
-
 def ask(text):
     return input(text + ": ").strip()
 
-# =======================================
-#   1. LÓGICA DE POSTGRESQL (Master DB)
-# =======================================
+# ======================================
+#    LÓGICA DE POSTGRESQL (Master DB)
+# ======================================
 
 def crear_tablas_postgres(conn):
     SQL_SCHEMA = """
@@ -80,7 +76,9 @@ def crear_tablas_postgres(conn):
         pais VARCHAR(50),
         verificacion_kyc BOOLEAN DEFAULT FALSE,
         email VARCHAR(150) UNIQUE NOT NULL,
-        fecha_registro TIMESTAMP DEFAULT NOW()
+        fecha_registro TIMESTAMP DEFAULT NOW(),
+        saldo_real NUMERIC(12,2) DEFAULT 0.00,
+        saldo_fichas NUMERIC(12,2) DEFAULT 0.00
     );
 
     CREATE TABLE promocion (
@@ -100,9 +98,10 @@ def crear_tablas_postgres(conn):
 
     CREATE TABLE metodo_pago (
         id_metodo SERIAL PRIMARY KEY,
-        tipo VARCHAR(50),
+        id_usuario INT NOT NULL REFERENCES usuario(id_usuario) ON DELETE CASCADE,
+        tipo VARCHAR(50) NOT NULL,
         datos_encriptados TEXT,
-        estado VARCHAR(20)
+        estado VARCHAR(20) DEFAULT 'activo',
     );
 
     CREATE TABLE transaccion (
@@ -156,7 +155,9 @@ def crear_tablas_postgres(conn):
         rake NUMERIC(10,2),
         bote_total NUMERIC(12,2),
         fecha_hora TIMESTAMP DEFAULT NOW(),
-        cartas_repartidas TEXT
+        cartas_repartidas TEXT,
+        ganador_id INT REFERENCES usuario(id_usuario),
+        modalidad VARCHAR(50)
     );
 
     CREATE TABLE usuario_mano (
@@ -186,13 +187,11 @@ def crear_tablas_postgres(conn):
         print(f"❌ Error al crear tablas: {e}")
         conn.rollback()
 
-# Crea el Usuario en Postgres
 def crear_usuario(pg_con):
     nombre = ask("Nombre del usuario")
     email = ask("Email del usuario")
     pais = ask("País del usuario")
     
-    # 1. Escribir en PostgreSQL
     query_pg = "INSERT INTO Usuario (nombre, email, pais) VALUES (%s, %s, %s) RETURNING id_usuario, saldo_real;"
     
     try:
@@ -207,14 +206,12 @@ def crear_usuario(pg_con):
         print(f"❌ Error al crear usuario: {e}")
         pg_con.rollback()
 
-# Escribe en PG, Mongo y Redis
-def crear_transaccion(pg_con, mongo_db, redis_con):
+def crear_transaccion(pg_con):
     id_usuario = int(ask("ID Usuario"))
     id_metodo = int(ask("ID Método de pago")) # Asumimos que ya existe
     monto = float(ask("Monto"))
     tipo = ask("Tipo (deposito/retiro)")
     
-    # 1. Escribir en PostgreSQL
     query_pg = """
         INSERT INTO Transaccion (id_usuario, id_metodo, monto, tipo, estado)
         VALUES (%s, %s, %s, %s, 'completada') RETURNING id_transaccion, fecha;
@@ -223,51 +220,23 @@ def crear_transaccion(pg_con, mongo_db, redis_con):
     try:
         cur = pg_con.cursor()
         cur.execute(query_pg, (id_usuario, id_metodo, monto, tipo))
-        id_transaccion, fecha_transaccion = cur.fetchone()
+        id_transaccion = cur.fetchone()
         
         # Actualizar saldo en Postgres
         op = "+" if tipo == "deposito" else "-"
         cur.execute(f"UPDATE Usuario SET saldo_real = saldo_real {op} %s WHERE id_usuario = %s RETURNING saldo_real;", (monto, id_usuario))
-        nuevo_saldo = cur.fetchone()[0]
         pg_con.commit()
         cur.close()
         print(f"✔️ Transacción {id_transaccion} creada en PostgreSQL.")
-
-        # 2. Escribir en MongoDB
-        # Obtenemos el 'tipo' del método de pago desde PG para desnormalizar
-        cur = pg_con.cursor()
-        cur.execute("SELECT tipo FROM Metodo_Pago WHERE id_metodo = %s", (id_metodo,))
-        tipo_metodo = cur.fetchone()[0]
-        cur.close()
-        
-        coleccion_transacciones = mongo_db['transacciones']
-        documento_transaccion = {
-            "id_transaccion": id_transaccion,
-            "id_usuario": id_usuario,
-            "id_metodo": id_metodo,
-            "medio": tipo_metodo, # Ej: 'PayPal' (Desnormalizado para Caso 4)
-            "monto": monto,
-            "tipo": tipo,
-            "fecha": fecha_transaccion
-        }
-        coleccion_transacciones.insert_one(documento_transaccion)
-        print(f"✔️ Transacción {id_transaccion} copiada a MongoDB.")
-        
-        # 3. Escribir en Redis
-        user_cache_key = f"user_balance:{id_usuario}"
-        redis_con.set(user_cache_key, float(nuevo_saldo), ex=300) # TTL de 5 min
-        print(f"✔️ Cache de balance para usuario {id_usuario} actualizado en Redis.")
         
     except Exception as e:
         print(f"❌ Error al crear transacción: {e}")
         pg_con.rollback()
 
-# Escribe en Postgres y Neo4j para casos 9 y 10
-def registrar_jugador_en_mesa(pg_con, neo4j_driver):
+def registrar_jugador_en_mesa(pg_con):
     id_usuario = int(ask("ID Usuario a sentar"))
     id_mesa = int(ask("ID Mesa a la que entra"))
     
-    # 1. Escribir en PostgreSQL
     query_pg = "INSERT INTO Usuario_Mesa (id_usuario, id_mesa) VALUES (%s, %s);"
     
     try:
@@ -276,23 +245,218 @@ def registrar_jugador_en_mesa(pg_con, neo4j_driver):
         pg_con.commit()
         cur.close()
         print(f"✔️ Usuario {id_usuario} sentado en mesa {id_mesa} en PostgreSQL.")
-        
-        # 2. Escribir en Neo4j
-        query_neo4j = """
-            MERGE (u:Usuario {id_usuario: $id_usuario})
-            MERGE (m:Mesa {id_mesa: $id_mesa})
-            MERGE (u)-[:JUGO_EN]->(m)
-        """
-        with neo4j_driver.session() as session:
-            session.run(query_neo4j, id_usuario=id_usuario, id_mesa=id_mesa)
-        print(f"✔️ Relación (Usuario)-[:JUGO_EN]->(Mesa) creada en Neo4j.")
 
     except Exception as e:
         print(f"❌ Error al sentar jugador: {e}")
         pg_con.rollback()
 
 # ====================================
-#   2. LÓGICA DE MONGODB (Casos 1-6)
+#    ETL BAJO DEMANDA
+# ====================================
+
+def sync_usuario_to_mongo(pg_con, mongo_db, id_usuario):
+    """Sincroniza UN usuario específico a MongoDB"""
+    try:
+        cur = pg_con.cursor()
+        cur.execute("""
+            SELECT id_usuario, nombre, email, pais, saldo_real, saldo_fichas
+            FROM usuario WHERE id_usuario = %s
+        """, (id_usuario,))
+        
+        row = cur.fetchone()
+        cur.close()
+        
+        if row:
+            usuario_doc = {
+                'id_usuario': row[0],
+                'nombre': row[1],
+                'email': row[2],
+                'pais': row[3],
+                'saldo_real': float(row[4]) if row[4] else 0.0,
+                'saldo_fichas': float(row[5]) if row[5] else 0.0,
+                'balance_neto': 0.0,  # Se calculará con manos
+                'manos_jugadas': 0
+            }
+            
+            mongo_db.usuarios.update_one(
+                {'id_usuario': id_usuario},
+                {'$set': usuario_doc},
+                upsert=True
+            )
+            return True
+    except Exception as e:
+        print(f"⚠️ Error sincronizando usuario {id_usuario}: {e}")
+        return False
+
+def sync_all_usuarios_to_mongo(pg_con, mongo_db):
+    """Sincroniza TODOS los usuarios a MongoDB (para casos de uso)"""
+    print("🔄 Sincronizando usuarios desde PostgreSQL a MongoDB...")
+    try:
+        cur = pg_con.cursor()
+        cur.execute("""
+            SELECT u.id_usuario, u.nombre, u.email, u.pais, u.saldo_real, u.saldo_fichas,
+                   COALESCE(SUM(um.ganancia), 0) as balance_neto,
+                   COUNT(DISTINCT um.id_mano) as manos_jugadas
+            FROM usuario u
+            LEFT JOIN usuario_mano um ON u.id_usuario = um.id_usuario
+            GROUP BY u.id_usuario
+        """)
+        
+        usuarios = cur.fetchall()
+        cur.close()
+        
+        for row in usuarios:
+            usuario_doc = {
+                'id_usuario': row[0],
+                'nombre': row[1],
+                'email': row[2],
+                'pais': row[3],
+                'saldo_real': float(row[4]) if row[4] else 0.0,
+                'saldo_fichas': float(row[5]) if row[5] else 0.0,
+                'balance_neto': float(row[6]) if row[6] else 0.0,
+                'manos_jugadas': row[7]
+            }
+            
+            mongo_db.usuarios.update_one(
+                {'id_usuario': row[0]},
+                {'$set': usuario_doc},
+                upsert=True
+            )
+        
+        print(f"✅ {len(usuarios)} usuarios sincronizados a MongoDB")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def sync_manos_to_mongo(pg_con, mongo_db):
+    """Sincroniza manos con toda su info desnormalizada"""
+    print("🔄 Sincronizando manos desde PostgreSQL a MongoDB...")
+    try:
+        cur = pg_con.cursor()
+        cur.execute("""
+            SELECT m.id_mano, m.id_mesa, m.rake, m.bote_total, m.fecha_hora,
+                   m.ganador_id, m.modalidad, ms.tipo as tipo_mesa
+            FROM mano m
+            JOIN mesa ms ON m.id_mesa = ms.id_mesa
+        """)
+        
+        manos = cur.fetchall()
+        
+        for row in manos:
+            mano_doc = {
+                'id_mano': row[0],
+                'id_mesa': row[1],
+                'rake': float(row[2]) if row[2] else 0.0,
+                'bote_total': float(row[3]) if row[3] else 0.0,
+                'fecha_hora': row[4],
+                'ganador_id': row[5],
+                'modalidad': row[6],
+                'tipo_mesa': row[7]
+            }
+            
+            mongo_db.manos.update_one(
+                {'id_mano': row[0]},
+                {'$set': mano_doc},
+                upsert=True
+            )
+        
+        cur.close()
+        print(f"✅ {len(manos)} manos sincronizadas a MongoDB")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def sync_transacciones_to_mongo(pg_con, mongo_db):
+    """Sincroniza transacciones con info desnormalizada"""
+    print("🔄 Sincronizando transacciones desde PostgreSQL a MongoDB...")
+    try:
+        cur = pg_con.cursor()
+        cur.execute("""
+            SELECT t.id_transaccion, t.id_usuario, u.nombre, mp.tipo as medio,
+                   t.fecha, t.monto, t.estado, t.tipo
+            FROM transaccion t
+            JOIN usuario u ON t.id_usuario = u.id_usuario
+            JOIN metodo_pago mp ON t.id_metodo = mp.id_metodo
+        """)
+        
+        transacciones = cur.fetchall()
+        
+        for row in transacciones:
+            trans_doc = {
+                'id_transaccion': row[0],
+                'id_usuario': row[1],
+                'usuario_nombre': row[2],
+                'medio': row[3],
+                'fecha': row[4],
+                'monto': float(row[5]) if row[5] else 0.0,
+                'estado': row[6],
+                'tipo': row[7]
+            }
+            
+            mongo_db.transacciones.update_one(
+                {'id_transaccion': row[0]},
+                {'$set': trans_doc},
+                upsert=True
+            )
+        
+        cur.close()
+        print(f"✅ {len(transacciones)} transacciones sincronizadas a MongoDB")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def sync_usuarios_mesas_to_neo4j(pg_con, neo4j_driver):
+    """Sincroniza relaciones Usuario-Mesa a Neo4j"""
+    print("🔄 Sincronizando relaciones Usuario-Mesa a Neo4j...")
+    try:
+        cur = pg_con.cursor()
+        
+        # Sincronizar usuarios
+        cur.execute("SELECT id_usuario, nombre FROM usuario")
+        usuarios = cur.fetchall()
+        
+        with neo4j_driver.session() as session:
+            for id_usuario, nombre in usuarios:
+                session.run("""
+                    MERGE (u:Usuario {id_usuario: $id_usuario})
+                    SET u.nombre = $nombre
+                """, {'id_usuario': id_usuario, 'nombre': nombre})
+        
+        # Sincronizar mesas
+        cur.execute("SELECT id_mesa, modalidad, tipo FROM mesa")
+        mesas = cur.fetchall()
+        
+        with neo4j_driver.session() as session:
+            for id_mesa, modalidad, tipo in mesas:
+                session.run("""
+                    MERGE (m:Mesa {id_mesa: $id_mesa})
+                    SET m.modalidad = $modalidad, m.tipo = $tipo
+                """, {'id_mesa': id_mesa, 'modalidad': modalidad, 'tipo': tipo})
+        
+        # Sincronizar relaciones
+        cur.execute("SELECT id_usuario, id_mesa FROM usuario_mesa")
+        relaciones = cur.fetchall()
+        
+        with neo4j_driver.session() as session:
+            for id_usuario, id_mesa in relaciones:
+                session.run("""
+                    MATCH (u:Usuario {id_usuario: $id_usuario})
+                    MATCH (m:Mesa {id_mesa: $id_mesa})
+                    MERGE (u)-[r:JUGO_EN]->(m)
+                """, {'id_usuario': id_usuario, 'id_mesa': id_mesa})
+        
+        cur.close()
+        print(f"✅ {len(relaciones)} relaciones sincronizadas a Neo4j")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+# ====================================
+#    LÓGICA DE MONGODB (Casos 1-6)
 # ====================================
 
 def caso1_volumen_modalidad(db):
@@ -332,7 +496,33 @@ def caso4_depositos_paypal(db):
     }))
     print(resultados)
 
-# Faltan aplicar casos 5 y 6
+def caso5_rake_por_mesa(db):
+    print("\n[MongoDB] 💸 5. Análisis de rake generado por mesa")
+    pipeline = [
+        { "$group": {
+            "_id": "$id_mesa",
+            "rake_total": { "$sum": "$rake" },
+            "manos_jugadas": { "$count": {} }
+        }},
+        { "$sort": { "rake_total": -1 }},
+        { "$limit": 10 }
+    ]
+    resultados = list(db.manos.aggregate(pipeline))
+    for r in resultados:
+        print(f"Mesa {r['_id']}: ${r['rake_total']:.2f} rake, {r['manos_jugadas']} manos")
+
+def caso6_usuarios_por_pais(db):
+    print("\n[MongoDB] 🌍 6. Distribución de usuarios por país")
+    pipeline = [
+        { "$group": {
+            "_id": "$pais",
+            "total_usuarios": { "$count": {} }
+        }},
+        { "$sort": { "total_usuarios": -1 }}
+    ]
+    resultados = list(db.usuarios.aggregate(pipeline))
+    for r in resultados:
+        print(f"{r['_id']}: {r['total_usuarios']} usuarios")
 
 # ====================================
 #   3. LÓGICA DE REDIS (Casos 7-8)
@@ -457,7 +647,7 @@ def main():
                 crear_usuario(pg_con)
             elif op == '3':
                 crear_transaccion(pg_con)
-            elif op == '4.':
+            elif op == '4':
                 registrar_jugador_en_mesa(pg_con)
             elif op == '5':
                 simular_juego(redis_con)
@@ -468,7 +658,8 @@ def main():
                 caso2_top10_balance(mongo_db)
                 caso3_manos_1000_septiembre(mongo_db)
                 caso4_depositos_paypal(mongo_db)
-                # (Llamar a casos 5 y 6 aquí)
+                caso5_rake_por_mesa(mongo_db)
+                caso6_usuarios_por_pais(mongo_db)
             
             elif op == '7':
                 print("\n--- Casos de Uso Redis ---")
