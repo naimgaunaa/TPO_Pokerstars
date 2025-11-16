@@ -51,7 +51,7 @@ def get_redis():
 def get_neo4j_driver():
     try:
         uri = os.getenv("NEO4J_URI")
-        user = os.getenv("NEO4J_USER")
+        user = os.getenv("NEO4J_USERNAME")
         password = os.getenv("NEO4J_PASSWORD")
         driver = GraphDatabase.driver(uri, auth=(user, password))
         driver.verify_connectivity()
@@ -459,45 +459,103 @@ def sync_usuarios_mesas_to_neo4j(pg_con, neo4j_driver):
 #    LÓGICA DE MONGODB (Casos 1-6)
 # ====================================
 
-def caso1_volumen_modalidad(db):
+def caso1_volumen_modalidad(pg_con, db):
     print("\n[MongoDB] 📊 1. Volumen jugado por modalidad (última semana)")
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando datos desde PostgreSQL...")
+    sync_manos_to_mongo(pg_con, db)
+    
+    # 2. Ejecutar consulta en MongoDB
     hace_7_dias = datetime.datetime.now() - datetime.timedelta(days=7)
     pipeline = [
         { "$match": { "fecha_hora": { "$gte": hace_7_dias } } },
         { "$group": {
-            "_id": "$modalidad", # 'modalidad' debe estar en la colección 'manos'
+            "_id": "$modalidad",
             "volumen_total": { "$sum": "$bote_total" }
         }}
     ]
     resultados = list(db.manos.aggregate(pipeline))
-    print(resultados)
+    
+    if resultados:
+        print("\nResultados:")
+        for r in resultados:
+            print(f"  {r['_id']}: ${r['volumen_total']:.2f}")
+    else:
+        print("  (Sin datos)")
 
-def caso2_top10_balance(db):
+def caso2_top10_balance(pg_con, db):
     print("\n[MongoDB] 💰 2. Top 10 jugadores con mayor balance neto")
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando datos desde PostgreSQL...")
+    sync_all_usuarios_to_mongo(pg_con, db)
+    
+    # 2. Ejecutar consulta en MongoDB
     resultados = list(db.usuarios.find().sort("balance_neto", -1).limit(10))
-    print(resultados)
+    
+    if resultados:
+        print("\nTop 10:")
+        for i, user in enumerate(resultados, 1):
+            print(f"  {i}. {user['nombre']}: ${user.get('balance_neto', 0):.2f}")
+    else:
+        print("  (Sin datos)")
 
-def caso3_manos_1000_septiembre(db):
+def caso3_manos_1000_septiembre(pg_con, db):
     print("\n[MongoDB] 🔥 3. Manos con bote > 1000 USD en septiembre")
-    # Asume que 'fecha_hora' es un objeto datetime
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando datos desde PostgreSQL...")
+    sync_manos_to_mongo(pg_con, db)
+    
+    # 2. Ejecutar consulta
     resultados = list(db.manos.find({
         "bote_total": { "$gt": 1000 },
         "$expr": { "$eq": [{ "$month": "$fecha_hora" }, 9] }
     }))
-    print(resultados)
+    
+    if resultados:
+        print(f"\nManos con bote > $1000 en septiembre:")
+        for m in resultados:
+            print(f"  Mano {m['id_mano']}: ${m['bote_total']:.2f} - {m['fecha_hora']}")
+    else:
+        print("  (Sin datos)")
 
-def caso4_depositos_paypal(db):
+def caso4_depositos_paypal(pg_con, db):
     print("\n[MongoDB] 💳 4. Depósitos de un usuario por PayPal")
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando transacciones desde PostgreSQL...")
+    sync_transacciones_to_mongo(pg_con, db)
+    
+    # 2. Pedir datos
     user_id = int(ask("ID Usuario"))
+    
+    # 3. Ejecutar consulta
     resultados = list(db.transacciones.find({
         "id_usuario": user_id,
         "tipo": "deposito",
-        "medio": "PayPal" # Asume que este campo se desnormalizó
+        "medio": "paypal"
     }))
-    print(resultados)
+    
+    if resultados:
+        print(f"\nDepósitos de usuario {user_id} por PayPal:")
+        total = 0
+        for t in resultados:
+            print(f"  {t['fecha']}: ${t['monto']:.2f}")
+            total += t['monto']
+        print(f"\nTotal: ${total:.2f}")
+    else:
+        print("  (Sin depósitos por PayPal)")
 
-def caso5_rake_por_mesa(db):
+def caso5_rake_por_mesa(pg_con, db):
     print("\n[MongoDB] 💸 5. Análisis de rake generado por mesa")
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando datos desde PostgreSQL...")
+    sync_manos_to_mongo(pg_con, db)
+    
+    # 2. Ejecutar consulta
     pipeline = [
         { "$group": {
             "_id": "$id_mesa",
@@ -508,11 +566,22 @@ def caso5_rake_por_mesa(db):
         { "$limit": 10 }
     ]
     resultados = list(db.manos.aggregate(pipeline))
-    for r in resultados:
-        print(f"Mesa {r['_id']}: ${r['rake_total']:.2f} rake, {r['manos_jugadas']} manos")
+    
+    if resultados:
+        print("\nTop 10 mesas por rake:")
+        for r in resultados:
+            print(f"  Mesa {r['_id']}: ${r['rake_total']:.2f} rake, {r['manos_jugadas']} manos")
+    else:
+        print("  (Sin datos)")
 
-def caso6_usuarios_por_pais(db):
+def caso6_usuarios_por_pais(pg_con, db):
     print("\n[MongoDB] 🌍 6. Distribución de usuarios por país")
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando datos desde PostgreSQL...")
+    sync_all_usuarios_to_mongo(pg_con, db)
+    
+    # 2. Ejecutar consulta en MongoDB
     pipeline = [
         { "$group": {
             "_id": "$pais",
@@ -521,8 +590,13 @@ def caso6_usuarios_por_pais(db):
         { "$sort": { "total_usuarios": -1 }}
     ]
     resultados = list(db.usuarios.aggregate(pipeline))
-    for r in resultados:
-        print(f"{r['_id']}: {r['total_usuarios']} usuarios")
+    
+    if resultados:
+        print("\nDistribución por país:")
+        for r in resultados:
+            print(f"  {r['_id']}: {r['total_usuarios']} usuarios")
+    else:
+        print("  (Sin datos)")
 
 # ====================================
 #   3. LÓGICA DE REDIS (Casos 7-8)
@@ -575,33 +649,58 @@ def caso8_balance_cache(r, pg_con):
 # ============================================================
 # Asume que 'registrar_jugador_en_mesa' se ha usado varias veces
 
-def caso9_usuarios_dos_mesas(driver):
+def caso9_usuarios_dos_mesas(pg_con, driver):
     print("\n[Neo4j] 🎯 9. Usuarios que jugaron en ≥2 mesas distintas")
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando relaciones desde PostgreSQL...")
+    sync_usuarios_mesas_to_neo4j(pg_con, driver)
+    
+    # 2. Ejecutar consulta
     query = """
         MATCH (u:Usuario)-[:JUGO_EN]->(m:Mesa)
         WITH u, count(DISTINCT m) as mesas_jugadas
         WHERE mesas_jugadas >= 2
-        RETURN u.id_usuario, mesas_jugadas
-        ORDER BY mesas_jugadas DESC;
+        RETURN u.id_usuario, u.nombre, mesas_jugadas
+        ORDER BY mesas_jugadas DESC
     """
+    
     with driver.session() as session:
         resultados = session.run(query).data()
-        print(resultados)
-
-def caso10_colusion(driver):
+        
+        if resultados:
+            print("\nUsuarios en múltiples mesas:")
+            for r in resultados:
+                print(f"  Usuario {r['u.id_usuario']} ({r['u.nombre']}): {r['mesas_jugadas']} mesas")
+        else:
+            print("  (Sin datos)")
+def caso10_colusion(pg_con, driver):
     print("\n[Neo4j] 🚨 10. Detección de clusters de colusión (Top 5 pares)")
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando relaciones desde PostgreSQL...")
+    sync_usuarios_mesas_to_neo4j(pg_con, driver)
+    
+    # 2. Ejecutar consulta
     query = """
         MATCH (u1:Usuario)-[:JUGO_EN]->(m:Mesa)<-[:JUGO_EN]-(u2:Usuario)
         WHERE id(u1) < id(u2)
         WITH u1, u2, count(m) as mesas_compartidas
         WHERE mesas_compartidas > 2
-        RETURN u1.id_usuario, u2.id_usuario, mesas_compartidas
+        RETURN u1.id_usuario, u1.nombre, u2.id_usuario, u2.nombre, mesas_compartidas
         ORDER BY mesas_compartidas DESC
-        LIMIT 5;
+        LIMIT 5
     """
+    
     with driver.session() as session:
         resultados = session.run(query).data()
-        print(resultados)
+        
+        if resultados:
+            print("\nPosible colusión (pares que juegan juntos frecuentemente):")
+            for r in resultados:
+                print(f"  {r['u1.nombre']} <-> {r['u2.nombre']}: {r['mesas_compartidas']} mesas compartidas")
+        else:
+            print("  (Sin datos)")
 
 # ============================================================
 #   MENÚ PRINCIPAL (ORQUESTADOR)
@@ -626,12 +725,12 @@ def main():
         print("       POKERSTARS DATA MANAGER")
         print("===================================")
         print("--- Admin (PostgreSQL) ---")
-        print("1. (SOLO 1 VEZ) Crear Tablas en PostgreSQL")
-        print("--- Escritura (Orquestada) ---")
-        print("2. Crear Nuevo Usuario (PG + Mongo)")
-        print("3. Crear Transacción (PG + Mongo + Redis)")
-        print("4. Registrar Jugador en Mesa (PG + Neo4j)")
-        print("5. (Simular) Jugador juega una mano (Redis)")
+        print("1. Crear Tablas en PostgreSQL")
+        print("--- Escritura (Solo PostgreSQL) ---")
+        print("2. Crear Nuevo Usuario")
+        print("3. Crear Transacción")
+        print("4. Registrar Jugador en Mesa")
+        print("5. Simular Jugador juega una mano")
         print("--- Lectura (Casos de Uso NoSQL) ---")
         print("6. Ver Casos de Uso (MongoDB)")
         print("7. Ver Casos de Uso (Redis)")
@@ -653,13 +752,16 @@ def main():
                 simular_juego(redis_con)
             
             elif op == '6':
-                print("\n--- Casos de Uso MongoDB ---")
-                caso1_volumen_modalidad(mongo_db)
-                caso2_top10_balance(mongo_db)
-                caso3_manos_1000_septiembre(mongo_db)
-                caso4_depositos_paypal(mongo_db)
-                caso5_rake_por_mesa(mongo_db)
-                caso6_usuarios_por_pais(mongo_db)
+                if mongo_db:
+                    print("\n--- Casos de Uso MongoDB ---")
+                    caso1_volumen_modalidad(pg_con, mongo_db)  # ← Pasar pg_con
+                    caso2_top10_balance(pg_con, mongo_db)       # ← Pasar pg_con
+                    caso3_manos_1000_septiembre(pg_con, mongo_db)  # ← Pasar pg_con
+                    caso4_depositos_paypal(pg_con, mongo_db)    # ← Pasar pg_con
+                    caso5_rake_por_mesa(pg_con, mongo_db)       # ← Pasar pg_con
+                    caso6_usuarios_por_pais(pg_con, mongo_db)   # ← Pasar pg_con
+                else:
+                    print("❌ MongoDB no disponible")
             
             elif op == '7':
                 print("\n--- Casos de Uso Redis ---")
@@ -667,9 +769,12 @@ def main():
                 caso8_balance_cache(redis_con, pg_con)
 
             elif op == '8':
-                print("\n--- Casos de Uso Neo4j ---")
-                caso9_usuarios_dos_mesas(neo4j_driver)
-                caso10_colusion(neo4j_driver)
+                if neo4j_driver:
+                    print("\n--- Casos de Uso Neo4j ---")
+                    caso9_usuarios_dos_mesas(pg_con, neo4j_driver)  # ← Pasar pg_con
+                    caso10_colusion(pg_con, neo4j_driver)            # ← Pasar pg_con
+                else:
+                    print("❌ Neo4j no disponible")
 
             elif op == 's':
                 print("Cerrando todas las conexiones...")
