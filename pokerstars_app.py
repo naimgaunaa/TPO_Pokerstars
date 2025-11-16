@@ -13,7 +13,9 @@ import datetime
 
 def get_postgres():
     try:
-        db_url = os.getenv("DATABASE_URL")
+        db_url = os.getenv("DATABASE_PUBLIC_URL")
+        if not db_url:
+            raise ValueError("No se encontró DATABASE_PUBLIC_URL ni DATABASE_URL en .env")
         conn = psycopg2.connect(db_url)
         print("✔️  Conexión a PostgreSQL (Railway) exitosa.")
         return conn
@@ -872,10 +874,9 @@ def caso10_colusion(pg_con, driver):
         else:
             print("  (Sin datos)")
 
-# ============================================================
+# ================================
 #   MENÚ PRINCIPAL (ORQUESTADOR)
-# ============================================================
-
+# ================================
 def main():
     # 1. Cargar .env
     load_dotenv()
@@ -886,7 +887,8 @@ def main():
     redis_con = get_redis()
     neo4j_driver = get_neo4j_driver()
     
-    if not all([pg_con, mongo_db, redis_con, neo4j_driver]):
+    # Validar conexiones (mongo_db no puede usarse con bool directamente)
+    if pg_con is None or mongo_db is None or redis_con is None or neo4j_driver is None:
         print("Faltan conexiones de base de datos. Saliendo.")
         return
 
