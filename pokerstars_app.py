@@ -183,13 +183,16 @@ def crear_tablas_postgres(conn):
         cur.execute(SQL_SCHEMA)
         conn.commit()
         cur.close()
-        print("✔️ Tablas de PostgreSQL creadas (o ya existentes).")
+        print("===================================")
+        print("✔️ Tablas de PostgreSQL creadas.")
+        print("===================================")
         
     except Exception as e:
         print(f"❌ Error al crear tablas: {e}")
         conn.rollback()
 
 def crear_usuario(pg_con):
+    print("===================================")
     nombre = ask("Nombre del usuario")
     email = ask("Email del usuario")
     pais = ask("País del usuario")
@@ -203,12 +206,15 @@ def crear_usuario(pg_con):
         pg_con.commit()
         cur.close()
         print(f"✔️ Usuario {id_usuario} creado en PostgreSQL.")
+        print("===================================")
         
     except Exception as e:
         print(f"❌ Error al crear usuario: {e}")
+        print("===================================")
         pg_con.rollback()
 
 def crear_transaccion(pg_con):
+    print("========================================================")
     id_usuario = int(ask("ID Usuario"))
     id_metodo = int(ask("ID Método de pago")) # Asumimos que ya existe
     monto = float(ask("Monto"))
@@ -230,12 +236,15 @@ def crear_transaccion(pg_con):
         pg_con.commit()
         cur.close()
         print(f"✔️ Transacción {id_transaccion} creada en PostgreSQL.")
+        print("========================================================")
         
     except Exception as e:
         print(f"❌ Error al crear transacción: {e}")
+        print("========================================================")
         pg_con.rollback()
 
 def registrar_jugador_en_mesa(pg_con):
+    print("==================================================================")
     id_usuario = int(ask("ID Usuario a sentar"))
     id_mesa = int(ask("ID Mesa a la que entra"))
     
@@ -247,14 +256,17 @@ def registrar_jugador_en_mesa(pg_con):
         pg_con.commit()
         cur.close()
         print(f"✔️ Usuario {id_usuario} sentado en mesa {id_mesa} en PostgreSQL.")
+        print("==================================================================")
 
     except Exception as e:
         print(f"❌ Error al sentar jugador: {e}")
+        print("==================================================================")
         pg_con.rollback()
 
 def crear_torneo(pg_con):
     """Crear un nuevo torneo"""
-    print("\n--- Crear Nuevo Torneo ---")
+    print("===================================")
+    print("--- Crear Nuevo Torneo ---")
     nombre = ask("Nombre del torneo")
     tipo = ask("Tipo (Freeroll/Buy-in/Satélite)")
     modalidad = ask("Modalidad (Texas Holdem/Omaha/Seven Card Stud)")
@@ -274,14 +286,17 @@ def crear_torneo(pg_con):
         pg_con.commit()
         cur.close()
         print(f"✔️ Torneo {id_torneo} '{nombre}' creado en PostgreSQL.")
+        print("===================================")
         
     except Exception as e:
         print(f"❌ Error al crear torneo: {e}")
+        print("===================================")
         pg_con.rollback()
 
 def crear_mesa(pg_con):
     """Crear una nueva mesa de poker"""
-    print("\n--- Crear Nueva Mesa ---")
+    print("===================================")
+    print("--- Crear Nueva Mesa ---")
     modalidad = ask("Modalidad (Texas Holdem/Omaha/Seven Card Stud)")
     tipo = ask("Tipo (Cash Game/Sit & Go/Torneo)")
     max_jugadores = int(ask("Máximo jugadores (6/8/9)"))
@@ -304,14 +319,17 @@ def crear_mesa(pg_con):
         pg_con.commit()
         cur.close()
         print(f"✔️ Mesa {id_mesa} ({modalidad} - {tipo}) creada en PostgreSQL.")
+        print("===================================")
         
     except Exception as e:
         print(f"❌ Error al crear mesa: {e}")
+        print("===================================")
         pg_con.rollback()
 
 def crear_metodo_pago(pg_con):
     """Crear un método de pago para un usuario"""
-    print("\n--- Crear Método de Pago ---")
+    print("===================================")
+    print("--- Crear Método de Pago ---")
     id_usuario = int(ask("ID Usuario"))
     
     print("Tipos disponibles: paypal, tarjeta, transferencia, criptomoneda")
@@ -333,16 +351,19 @@ def crear_metodo_pago(pg_con):
         pg_con.commit()
         cur.close()
         print(f"✔️ Método de pago {id_metodo} ({tipo}) creado para usuario {id_usuario}.")
+        print("===================================")
         
     except Exception as e:
         print(f"❌ Error al crear método de pago: {e}")
+        print("===================================")
         pg_con.rollback()
 
 def crear_mano(pg_con):
     """Crear una mano de poker con datos aleatorios"""
     import random
     
-    print("\n--- Crear Mano de Poker ---")
+    print("===================================")
+    print("--- Crear Mano de Poker ---")
     id_mesa = int(ask("ID Mesa"))
     
     # Verificar que la mesa existe y obtener su modalidad
@@ -421,9 +442,11 @@ def crear_mano(pg_con):
         print(f"   Ganador: Usuario {ganador_id}")
         print(f"   Fecha: {fecha_final}")
         print(f"   Participantes: {len(usuarios_en_mesa)} jugadores")
+        print("===================================")
         
     except Exception as e:
         print(f"❌ Error al crear mano: {e}")
+        print("===================================")
         pg_con.rollback()
 
 # ====================================
@@ -776,10 +799,12 @@ def caso6_usuarios_por_pais(pg_con, db):
 
 # Asume que 'simular_juego' se llama cada vez que un jugador juega una mano
 def simular_juego(redis_con):
+    print("===================================")
     id_usuario = ask("ID Usuario que jugó una mano")
     # ZINCRBY: Incrementa el score del 'id_usuario' en el set 'ranking_activos' en 1
     redis_con.zincrby("ranking_activos", 1, id_usuario)
-    print(f"Actividad de {id_usuario} registrada en Redis.")
+    print(f"✔️ Actividad de {id_usuario} registrada en Redis.")
+    print("===================================")
 
 def caso7_ranking(r):
     print("\n[Redis] 🏆 7. Ranking de jugadores activos (Top 5)")
@@ -898,6 +923,7 @@ def main():
         print("===================================")
         print("--- Admin (PostgreSQL) ---")
         print("1. Crear Tablas en PostgreSQL")
+        print("")
         print("--- Escritura (PostgreSQL) ---")
         print("2. Crear Nuevo Usuario")
         print("3. Crear Método de Pago")
@@ -907,13 +933,17 @@ def main():
         print("7. Registrar Jugador en Mesa")
         print("8. Crear Mano (Aleatoria)")
         print("9. Simular Jugador juega una mano (Redis)")
+        print("")
         print("--- Lectura (Casos de Uso NoSQL) ---")
         print("m. Ver Casos de Uso (MongoDB)")
         print("r. Ver Casos de Uso (Redis)")
         print("n. Ver Casos de Uso (Neo4j)")
         print("s. Salir")
+        print("===================================")
+        print("")
         
         op = ask("Opción")
+        print("")
 
         try:
             if op == '1':
