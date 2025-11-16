@@ -55,7 +55,7 @@ def get_neo4j_driver():
         password = os.getenv("NEO4J_PASSWORD")
         driver = GraphDatabase.driver(uri, auth=(user, password))
         driver.verify_connectivity()
-        print("✔️  Conexión a Neo4j (Local) exitosa.")
+        print("✔️  Conexión a Neo4j (Aura) exitosa.")
         return driver
     except Exception as e:
         print(f"❌ ERROR Neo4j: {e}")
@@ -101,7 +101,7 @@ def crear_tablas_postgres(conn):
         id_usuario INT NOT NULL REFERENCES usuario(id_usuario) ON DELETE CASCADE,
         tipo VARCHAR(50) NOT NULL,
         datos_encriptados TEXT,
-        estado VARCHAR(20) DEFAULT 'activo',
+        estado VARCHAR(20) DEFAULT 'activo'
     );
 
     CREATE TABLE transaccion (
@@ -192,7 +192,7 @@ def crear_usuario(pg_con):
     email = ask("Email del usuario")
     pais = ask("País del usuario")
     
-    query_pg = "INSERT INTO Usuario (nombre, email, pais) VALUES (%s, %s, %s) RETURNING id_usuario, saldo_real;"
+    query_pg = "INSERT INTO usuario (nombre, email, pais) VALUES (%s, %s, %s) RETURNING id_usuario, saldo_real;"
     
     try:
         cur = pg_con.cursor()
@@ -213,7 +213,7 @@ def crear_transaccion(pg_con):
     tipo = ask("Tipo (deposito/retiro)")
     
     query_pg = """
-        INSERT INTO Transaccion (id_usuario, id_metodo, monto, tipo, estado)
+        INSERT INTO transaccion (id_usuario, id_metodo, monto, tipo, estado)
         VALUES (%s, %s, %s, %s, 'completada') RETURNING id_transaccion, fecha;
     """
     
@@ -224,7 +224,7 @@ def crear_transaccion(pg_con):
         
         # Actualizar saldo en Postgres
         op = "+" if tipo == "deposito" else "-"
-        cur.execute(f"UPDATE Usuario SET saldo_real = saldo_real {op} %s WHERE id_usuario = %s RETURNING saldo_real;", (monto, id_usuario))
+        cur.execute(f"UPDATE usuario SET saldo_real = saldo_real {op} %s WHERE id_usuario = %s RETURNING saldo_real;", (monto, id_usuario))
         pg_con.commit()
         cur.close()
         print(f"✔️ Transacción {id_transaccion} creada en PostgreSQL.")
@@ -237,7 +237,7 @@ def registrar_jugador_en_mesa(pg_con):
     id_usuario = int(ask("ID Usuario a sentar"))
     id_mesa = int(ask("ID Mesa a la que entra"))
     
-    query_pg = "INSERT INTO Usuario_Mesa (id_usuario, id_mesa) VALUES (%s, %s);"
+    query_pg = "INSERT INTO usuario_mesa (id_usuario, id_mesa) VALUES (%s, %s);"
     
     try:
         cur = pg_con.cursor()
@@ -248,6 +248,180 @@ def registrar_jugador_en_mesa(pg_con):
 
     except Exception as e:
         print(f"❌ Error al sentar jugador: {e}")
+        pg_con.rollback()
+
+def crear_torneo(pg_con):
+    """Crear un nuevo torneo"""
+    print("\n--- Crear Nuevo Torneo ---")
+    nombre = ask("Nombre del torneo")
+    tipo = ask("Tipo (Freeroll/Buy-in/Satélite)")
+    modalidad = ask("Modalidad (Texas Holdem/Omaha/Seven Card Stud)")
+    buy_in = float(ask("Buy-in (0 para freeroll)"))
+    max_jugadores = int(ask("Máximo de jugadores"))
+    
+    query = """
+        INSERT INTO torneo (nombre, tipo, modalidad, buy_in, max_jugadores, hora_inicio)
+        VALUES (%s, %s, %s, %s, %s, NOW() + INTERVAL '1 hour')
+        RETURNING id_torneo;
+    """
+    
+    try:
+        cur = pg_con.cursor()
+        cur.execute(query, (nombre, tipo, modalidad, buy_in, max_jugadores))
+        id_torneo = cur.fetchone()[0]
+        pg_con.commit()
+        cur.close()
+        print(f"✔️ Torneo {id_torneo} '{nombre}' creado en PostgreSQL.")
+        
+    except Exception as e:
+        print(f"❌ Error al crear torneo: {e}")
+        pg_con.rollback()
+
+def crear_mesa(pg_con):
+    """Crear una nueva mesa de poker"""
+    print("\n--- Crear Nueva Mesa ---")
+    modalidad = ask("Modalidad (Texas Holdem/Omaha/Seven Card Stud)")
+    tipo = ask("Tipo (Cash Game/Sit & Go/Torneo)")
+    max_jugadores = int(ask("Máximo jugadores (6/8/9)"))
+    ciegas = ask("Ciegas (ej: 5/10, 10/20, 25/50)")
+    
+    # Preguntar si pertenece a un torneo
+    torneo_input = ask("ID Torneo (dejar vacío si es Cash Game)")
+    id_torneo = int(torneo_input) if torneo_input else None
+    
+    query = """
+        INSERT INTO mesa (modalidad, tipo, max_jugadores, ciegas, id_torneo, reglas)
+        VALUES (%s, %s, %s, %s, %s, 'Reglas estándar')
+        RETURNING id_mesa;
+    """
+    
+    try:
+        cur = pg_con.cursor()
+        cur.execute(query, (modalidad, tipo, max_jugadores, ciegas, id_torneo))
+        id_mesa = cur.fetchone()[0]
+        pg_con.commit()
+        cur.close()
+        print(f"✔️ Mesa {id_mesa} ({modalidad} - {tipo}) creada en PostgreSQL.")
+        
+    except Exception as e:
+        print(f"❌ Error al crear mesa: {e}")
+        pg_con.rollback()
+
+def crear_metodo_pago(pg_con):
+    """Crear un método de pago para un usuario"""
+    print("\n--- Crear Método de Pago ---")
+    id_usuario = int(ask("ID Usuario"))
+    
+    print("Tipos disponibles: paypal, tarjeta, transferencia, criptomoneda")
+    tipo = ask("Tipo de método de pago")
+    
+    # Simulamos datos encriptados
+    datos_encriptados = f"enc_{tipo}_{id_usuario}_{datetime.datetime.now().timestamp()}"
+    
+    query = """
+        INSERT INTO metodo_pago (id_usuario, tipo, datos_encriptados, estado)
+        VALUES (%s, %s, %s, 'activo')
+        RETURNING id_metodo;
+    """
+    
+    try:
+        cur = pg_con.cursor()
+        cur.execute(query, (id_usuario, tipo, datos_encriptados))
+        id_metodo = cur.fetchone()[0]
+        pg_con.commit()
+        cur.close()
+        print(f"✔️ Método de pago {id_metodo} ({tipo}) creado para usuario {id_usuario}.")
+        
+    except Exception as e:
+        print(f"❌ Error al crear método de pago: {e}")
+        pg_con.rollback()
+
+def crear_mano(pg_con):
+    """Crear una mano de poker con datos aleatorios"""
+    import random
+    
+    print("\n--- Crear Mano de Poker ---")
+    id_mesa = int(ask("ID Mesa"))
+    
+    # Verificar que la mesa existe y obtener su modalidad
+    try:
+        cur = pg_con.cursor()
+        cur.execute("SELECT modalidad, tipo FROM mesa WHERE id_mesa = %s", (id_mesa,))
+        mesa_info = cur.fetchone()
+        
+        if not mesa_info:
+            print(f"❌ La mesa {id_mesa} no existe.")
+            cur.close()
+            return
+        
+        modalidad, tipo_mesa = mesa_info
+        
+        # Obtener usuarios sentados en esta mesa
+        cur.execute("""
+            SELECT id_usuario FROM usuario_mesa WHERE id_mesa = %s
+        """, (id_mesa,))
+        usuarios_en_mesa = [row[0] for row in cur.fetchall()]
+        
+        if len(usuarios_en_mesa) < 2:
+            print(f"⚠️ La mesa {id_mesa} tiene menos de 2 jugadores. Agrega jugadores primero.")
+            cur.close()
+            return
+        
+        # Seleccionar jugador aleatorio que participó en la mano
+        id_usuario = random.choice(usuarios_en_mesa)
+        
+        # Generar datos aleatorios
+        bote_total = round(random.uniform(100, 5000), 2)
+        rake = round(bote_total * 0.05, 2)  # 5% de rake
+        ganador_id = random.choice(usuarios_en_mesa)
+        
+        # Preguntar si quiere personalizar el bote o usar uno específico
+        print(f"Bote generado automáticamente: ${bote_total}")
+        personalizar = ask("¿Personalizar bote? (s/n)").lower()
+        
+        if personalizar == 's':
+            bote_total = float(ask("Monto del bote"))
+            rake = round(bote_total * 0.05, 2)
+            
+            print(f"Jugadores en mesa: {usuarios_en_mesa}")
+            ganador_id = int(ask("ID del ganador"))
+        
+        # Generar fecha (puede ser reciente o específica)
+        fecha_input = ask("Fecha (dejar vacío para ahora, o formato YYYY-MM-DD)")
+        if fecha_input:
+            fecha_hora = f"{fecha_input} {random.randint(10, 23)}:{random.randint(0, 59)}:00"
+        else:
+            fecha_hora = None  # Usará NOW()
+        
+        query = """
+            INSERT INTO mano (id_mesa, id_usuario, rake, bote_total, fecha_hora, ganador_id, modalidad, cartas_repartidas)
+            VALUES (%s, %s, %s, %s, COALESCE(%s::timestamp, NOW()), %s, %s, %s)
+            RETURNING id_mano, fecha_hora;
+        """
+        
+        cartas = f"[{random.choice(['As', 'K', 'Q', 'J', '10'])}, {random.choice(['As', 'K', 'Q', 'J', '10'])}]"
+        
+        cur.execute(query, (id_mesa, id_usuario, rake, bote_total, fecha_hora, ganador_id, modalidad, cartas))
+        id_mano, fecha_final = cur.fetchone()
+        
+        # Insertar relación usuario-mano para todos los participantes
+        for usuario in usuarios_en_mesa:
+            cur.execute("""
+                INSERT INTO usuario_mano (id_usuario, id_mano) VALUES (%s, %s)
+            """, (usuario, id_mano))
+        
+        pg_con.commit()
+        cur.close()
+        
+        print(f"✔️ Mano {id_mano} creada:")
+        print(f"   Mesa: {id_mesa} ({modalidad})")
+        print(f"   Bote: ${bote_total} | Rake: ${rake}")
+        print(f"   Ganador: Usuario {ganador_id}")
+        print(f"   Fecha: {fecha_final}")
+        print(f"   Participantes: {len(usuarios_en_mesa)} jugadores")
+        
+    except Exception as e:
+        print(f"❌ Error al crear mano: {e}")
         pg_con.rollback()
 
 # ====================================
@@ -294,12 +468,8 @@ def sync_all_usuarios_to_mongo(pg_con, mongo_db):
     try:
         cur = pg_con.cursor()
         cur.execute("""
-            SELECT u.id_usuario, u.nombre, u.email, u.pais, u.saldo_real, u.saldo_fichas,
-                   COALESCE(SUM(um.ganancia), 0) as balance_neto,
-                   COUNT(DISTINCT um.id_mano) as manos_jugadas
+            SELECT u.id_usuario, u.nombre, u.email, u.pais, u.saldo_real, u.saldo_fichas
             FROM usuario u
-            LEFT JOIN usuario_mano um ON u.id_usuario = um.id_usuario
-            GROUP BY u.id_usuario
         """)
         
         usuarios = cur.fetchall()
@@ -313,8 +483,8 @@ def sync_all_usuarios_to_mongo(pg_con, mongo_db):
                 'pais': row[3],
                 'saldo_real': float(row[4]) if row[4] else 0.0,
                 'saldo_fichas': float(row[5]) if row[5] else 0.0,
-                'balance_neto': float(row[6]) if row[6] else 0.0,
-                'manos_jugadas': row[7]
+                'balance_neto': 0.0,
+                'manos_jugadas': 0
             }
             
             mongo_db.usuarios.update_one(
@@ -630,7 +800,7 @@ def caso8_balance_cache(r, pg_con):
         print("... Cache miss. Consultando PostgreSQL ...")
         try:
             cur = pg_con.cursor()
-            cur.execute("SELECT saldo_real FROM Usuario WHERE id_usuario = %s", (id_usuario,))
+            cur.execute("SELECT saldo_real FROM usuario WHERE id_usuario = %s", (id_usuario,))
             resultado = cur.fetchone()
             cur.close()
             
@@ -726,15 +896,19 @@ def main():
         print("===================================")
         print("--- Admin (PostgreSQL) ---")
         print("1. Crear Tablas en PostgreSQL")
-        print("--- Escritura (Solo PostgreSQL) ---")
+        print("--- Escritura (PostgreSQL) ---")
         print("2. Crear Nuevo Usuario")
-        print("3. Crear Transacción")
-        print("4. Registrar Jugador en Mesa")
-        print("5. Simular Jugador juega una mano")
+        print("3. Crear Método de Pago")
+        print("4. Crear Transacción")
+        print("5. Crear Torneo")
+        print("6. Crear Mesa")
+        print("7. Registrar Jugador en Mesa")
+        print("8. Crear Mano (Aleatoria)")
+        print("9. Simular Jugador juega una mano (Redis)")
         print("--- Lectura (Casos de Uso NoSQL) ---")
-        print("6. Ver Casos de Uso (MongoDB)")
-        print("7. Ver Casos de Uso (Redis)")
-        print("8. Ver Casos de Uso (Neo4j)")
+        print("m. Ver Casos de Uso (MongoDB)")
+        print("r. Ver Casos de Uso (Redis)")
+        print("n. Ver Casos de Uso (Neo4j)")
         print("s. Salir")
         
         op = ask("Opción")
@@ -745,34 +919,42 @@ def main():
             elif op == '2':
                 crear_usuario(pg_con)
             elif op == '3':
-                crear_transaccion(pg_con)
+                crear_metodo_pago(pg_con)
             elif op == '4':
-                registrar_jugador_en_mesa(pg_con)
+                crear_transaccion(pg_con)
             elif op == '5':
+                crear_torneo(pg_con)
+            elif op == '6':
+                crear_mesa(pg_con)
+            elif op == '7':
+                registrar_jugador_en_mesa(pg_con)
+            elif op == '8':
+                crear_mano(pg_con)
+            elif op == '9':
                 simular_juego(redis_con)
             
-            elif op == '6':
+            elif op == 'm':
                 if mongo_db:
                     print("\n--- Casos de Uso MongoDB ---")
-                    caso1_volumen_modalidad(pg_con, mongo_db)  # ← Pasar pg_con
-                    caso2_top10_balance(pg_con, mongo_db)       # ← Pasar pg_con
-                    caso3_manos_1000_septiembre(pg_con, mongo_db)  # ← Pasar pg_con
-                    caso4_depositos_paypal(pg_con, mongo_db)    # ← Pasar pg_con
-                    caso5_rake_por_mesa(pg_con, mongo_db)       # ← Pasar pg_con
-                    caso6_usuarios_por_pais(pg_con, mongo_db)   # ← Pasar pg_con
+                    caso1_volumen_modalidad(pg_con, mongo_db)
+                    caso2_top10_balance(pg_con, mongo_db)
+                    caso3_manos_1000_septiembre(pg_con, mongo_db)
+                    caso4_depositos_paypal(pg_con, mongo_db)
+                    caso5_rake_por_mesa(pg_con, mongo_db)
+                    caso6_usuarios_por_pais(pg_con, mongo_db)
                 else:
                     print("❌ MongoDB no disponible")
             
-            elif op == '7':
+            elif op == 'r':
                 print("\n--- Casos de Uso Redis ---")
                 caso7_ranking(redis_con)
                 caso8_balance_cache(redis_con, pg_con)
 
-            elif op == '8':
+            elif op == 'n':
                 if neo4j_driver:
                     print("\n--- Casos de Uso Neo4j ---")
-                    caso9_usuarios_dos_mesas(pg_con, neo4j_driver)  # ← Pasar pg_con
-                    caso10_colusion(pg_con, neo4j_driver)            # ← Pasar pg_con
+                    caso9_usuarios_dos_mesas(pg_con, neo4j_driver)
+                    caso10_colusion(pg_con, neo4j_driver)
                 else:
                     print("❌ Neo4j no disponible")
 
