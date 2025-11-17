@@ -522,8 +522,8 @@ def sync_all_usuarios_to_mongo(pg_con, mongo_db):
             # Calcular balance_neto: suma de depósitos menos retiros
             cur.execute("""
                 SELECT 
-                    COALESCE(SUM(CASE WHEN tipo = 'Deposito' THEN monto ELSE 0 END), 0) as depositos,
-                    COALESCE(SUM(CASE WHEN tipo = 'Retiro' THEN monto ELSE 0 END), 0) as retiros
+                    COALESCE(SUM(CASE WHEN tipo = 'deposito' THEN monto ELSE 0 END), 0) as depositos,
+                    COALESCE(SUM(CASE WHEN tipo = 'retiro' THEN monto ELSE 0 END), 0) as retiros
                 FROM transaccion
                 WHERE id_usuario = %s AND estado = 'completada'
             """, (id_usuario,))
@@ -824,7 +824,7 @@ def caso3_manos_1000_septiembre(pg_con, db):
         print("  (Sin datos)")
 
 def caso4_depositos_paypal(pg_con, db):
-    print("\n[MongoDB] 💳 4. Depósitos de un usuario por PayPal")
+    print("\n[MongoDB] 💳 4. Depósitos de un usuario por paypal")
     
     # 1. ETL bajo demanda
     print("🔄 Cargando transacciones desde PostgreSQL...")
@@ -836,19 +836,19 @@ def caso4_depositos_paypal(pg_con, db):
     # 3. Ejecutar consulta
     resultados = list(db.transacciones.find({
         "id_usuario": user_id,
-        "tipo": "Deposito",
-        "medio": "Paypal"
+        "tipo": "deposito",
+        "medio": "paypal"
     }))
     
     if resultados:
-        print(f"\nDepósitos de usuario {user_id} por PayPal:")
+        print(f"\nDepósitos de usuario {user_id} por paypal:")
         total = 0
         for t in resultados:
             print(f"  {t['fecha']}: ${t['monto']:.2f}")
             total += t['monto']
         print(f"\nTotal: ${total:.2f}")
     else:
-        print("  (Sin depósitos por PayPal)")
+        print("  (Sin depósitos por paypal)")
 
 # ====================================
 #   LÓGICA DE CASSANDRA (Casos 5-6)
@@ -1059,7 +1059,7 @@ def caso6_transacciones_por_usuario_fecha(pg_con, astra_db):
             print(f"\nResumen:")
             print(f"  Total transacciones: {len(resultados)}")
             print(f"  Depósitos: ${total_depositos:.2f}")
-            print(f"  Retiros: ${total_retiros:.2f}")
+            print(f"  retiros: ${total_retiros:.2f}")
         else:
             print("  (Sin datos)")
     except Exception as e:
@@ -1260,7 +1260,7 @@ def main():
                     print("❌ Cassandra no disponible")
             
             elif op == 'r':
-                print("\n--- Casos de Uso Redis ---")
+                print("\n--- Casos de Uso Redis ---") # GET user_balance:1 para chequear en consola
                 caso7_ranking(redis_con)
                 caso8_balance_cache(redis_con, pg_con)
 
