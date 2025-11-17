@@ -5,7 +5,6 @@ import redis
 from neo4j import GraphDatabase
 from astrapy import DataAPIClient
 from dotenv import load_dotenv
-import time
 import datetime
 
 # ===================================
@@ -177,11 +176,9 @@ def crear_tablas_postgres(conn):
     CREATE TABLE mano (
         id_mano SERIAL PRIMARY KEY,
         id_mesa INT NOT NULL REFERENCES mesa(id_mesa),
-        id_usuario INT NOT NULL REFERENCES usuario(id_usuario),
         rake NUMERIC(10,2),
         bote_total NUMERIC(12,2),
         fecha_hora TIMESTAMP DEFAULT NOW(),
-        cartas_repartidas TEXT,
         ganador_id INT REFERENCES usuario(id_usuario),
         modalidad VARCHAR(50)
     );
@@ -414,9 +411,6 @@ def crear_mano(pg_con):
             cur.close()
             return
         
-        # Seleccionar jugador aleatorio que participó en la mano
-        id_usuario = random.choice(usuarios_en_mesa)
-        
         # Generar datos aleatorios
         bote_total = round(random.uniform(100, 5000), 2)
         rake = round(bote_total * 0.05, 2)  # 5% de rake
@@ -441,14 +435,12 @@ def crear_mano(pg_con):
             fecha_hora = None  # Usará NOW()
         
         query = """
-            INSERT INTO mano (id_mesa, id_usuario, rake, bote_total, fecha_hora, ganador_id, modalidad, cartas_repartidas)
-            VALUES (%s, %s, %s, %s, COALESCE(%s::timestamp, NOW()), %s, %s, %s)
+            INSERT INTO mano (id_mesa, rake, bote_total, fecha_hora, ganador_id, modalidad)
+            VALUES (%s, %s, %s, COALESCE(%s::timestamp, NOW()), %s, %s)
             RETURNING id_mano, fecha_hora;
         """
         
-        cartas = f"[{random.choice(['As', 'K', 'Q', 'J', '10'])}, {random.choice(['As', 'K', 'Q', 'J', '10'])}]"
-        
-        cur.execute(query, (id_mesa, id_usuario, rake, bote_total, fecha_hora, ganador_id, modalidad, cartas))
+        cur.execute(query, (id_mesa, rake, bote_total, fecha_hora, ganador_id, modalidad))
         id_mano, fecha_final = cur.fetchone()
         
         # Insertar relación usuario-mano para todos los participantes
@@ -521,14 +513,17 @@ def sync_all_usuarios_to_mongo(pg_con, mongo_db):
         cur.execute("SELECT id_usuario, nombre, email, pais, saldo_real, saldo_fichas FROM usuario")
         usuarios = cur.fetchall()
         
+        insertados = 0
+        actualizados = 0
+        
         for row in usuarios:
             id_usuario = row[0]
             
             # Calcular balance_neto: suma de depósitos menos retiros
             cur.execute("""
                 SELECT 
-                    COALESCE(SUM(CASE WHEN tipo = 'deposito' THEN monto ELSE 0 END), 0) as depositos,
-                    COALESCE(SUM(CASE WHEN tipo = 'retiro' THEN monto ELSE 0 END), 0) as retiros
+                    COALESCE(SUM(CASE WHEN tipo = 'Deposito' THEN monto ELSE 0 END), 0) as depositos,
+                    COALESCE(SUM(CASE WHEN tipo = 'Retiro' THEN monto ELSE 0 END), 0) as retiros
                 FROM transaccion
                 WHERE id_usuario = %s AND estado = 'completada'
             """, (id_usuario,))
@@ -573,14 +568,22 @@ def sync_all_usuarios_to_mongo(pg_con, mongo_db):
                 'manos_ganadas': manos_ganadas
             }
             
-            mongo_db.usuarios.update_one(
+            result = mongo_db.usuarios.update_one(
                 {'id_usuario': id_usuario},
                 {'$set': usuario_doc},
                 upsert=True
             )
+            
+            if result.upserted_id:
+                insertados += 1
+            elif result.modified_count > 0:
+                actualizados += 1
         
         cur.close()
-        print(f"✅ {len(usuarios)} usuarios sincronizados a MongoDB con balance calculado")
+        print(f"✅ Usuarios sincronizados a MongoDB:")
+        print(f"   📝 {insertados} nuevos insertados")
+        print(f"   🔄 {actualizados} actualizados")
+        print(f"   📊 Total en PostgreSQL: {len(usuarios)}")
         return True
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -600,6 +603,9 @@ def sync_manos_to_mongo(pg_con, mongo_db):
         
         manos = cur.fetchall()
         
+        insertadas = 0
+        actualizadas = 0
+        
         for row in manos:
             mano_doc = {
                 'id_mano': row[0],
@@ -612,14 +618,22 @@ def sync_manos_to_mongo(pg_con, mongo_db):
                 'tipo_mesa': row[7]
             }
             
-            mongo_db.manos.update_one(
+            result = mongo_db.manos.update_one(
                 {'id_mano': row[0]},
                 {'$set': mano_doc},
                 upsert=True
             )
+            
+            if result.upserted_id:
+                insertadas += 1
+            elif result.modified_count > 0:
+                actualizadas += 1
         
         cur.close()
-        print(f"✅ {len(manos)} manos sincronizadas a MongoDB")
+        print(f"✅ Manos sincronizadas a MongoDB:")
+        print(f"   📝 {insertadas} nuevas insertadas")
+        print(f"   🔄 {actualizadas} actualizadas")
+        print(f"   📊 Total en PostgreSQL: {len(manos)}")
         return True
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -640,6 +654,9 @@ def sync_transacciones_to_mongo(pg_con, mongo_db):
         
         transacciones = cur.fetchall()
         
+        insertadas = 0
+        actualizadas = 0
+        
         for row in transacciones:
             trans_doc = {
                 'id_transaccion': row[0],
@@ -652,14 +669,22 @@ def sync_transacciones_to_mongo(pg_con, mongo_db):
                 'tipo': row[7]
             }
             
-            mongo_db.transacciones.update_one(
+            result = mongo_db.transacciones.update_one(
                 {'id_transaccion': row[0]},
                 {'$set': trans_doc},
                 upsert=True
             )
+            
+            if result.upserted_id:
+                insertadas += 1
+            elif result.modified_count > 0:
+                actualizadas += 1
         
         cur.close()
-        print(f"✅ {len(transacciones)} transacciones sincronizadas a MongoDB")
+        print(f"✅ Transacciones sincronizadas a MongoDB:")
+        print(f"   📝 {insertadas} nuevas insertadas")
+        print(f"   🔄 {actualizadas} actualizadas")
+        print(f"   📊 Total en PostgreSQL: {len(transacciones)}")
         return True
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -671,6 +696,14 @@ def sync_usuarios_mesas_to_neo4j(pg_con, neo4j_driver):
     try:
         cur = pg_con.cursor()
         
+        # Garantizar unicidad por id para evitar duplicados por tipo distinto (string/int)
+        try:
+            with neo4j_driver.session() as session:
+                session.run("CREATE CONSTRAINT usuario_id IF NOT EXISTS FOR (u:Usuario) REQUIRE u.id_usuario IS UNIQUE")
+                session.run("CREATE CONSTRAINT mesa_id IF NOT EXISTS FOR (m:Mesa) REQUIRE m.id_mesa IS UNIQUE")
+        except Exception as ce:
+            print(f"⚠️ No se pudo crear constraints (puede haber duplicados existentes o falta de permisos): {ce}")
+
         # Sincronizar usuarios
         cur.execute("SELECT id_usuario, nombre FROM usuario")
         usuarios = cur.fetchall()
@@ -864,30 +897,39 @@ def sync_manos_to_cassandra(pg_con, astra_db):
         
         collection = astra_db.get_collection("manos_por_fecha_mesa")
         
-        count = 0
+        inserted = 0
+        updated = 0
         for row in manos:
             id_mano, id_mesa, fecha_hora, bote_total, rake, ganador_id, modalidad = row
             if not fecha_hora:
-                fecha_hora = datetime.datetime.now()
-            
+                fecha_hora = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+            if fecha_hora.tzinfo is None:
+                fecha_hora = fecha_hora.replace(tzinfo=datetime.timezone.utc)
             fecha_str = fecha_hora.strftime("%Y-%m-%d")
-            
-            documento = {
-                "_id": f"{id_mesa}_{fecha_str}_{id_mano}",
+            fecha_iso = fecha_hora.astimezone(datetime.timezone.utc).isoformat()
+            doc_id = f"{id_mesa}_{fecha_str}_{id_mano}"
+            documento_base = {
                 "id_mesa": id_mesa,
                 "fecha": fecha_str,
                 "id_mano": id_mano,
-                "fecha_hora": fecha_hora,
+                "fecha_hora": fecha_iso,
                 "bote_total": float(bote_total) if bote_total else 0.0,
                 "rake": float(rake) if rake else 0.0,
-                "ganador_id": ganador_id if ganador_id else 0,
+                "ganador_id": int(ganador_id) if ganador_id else 0,
                 "modalidad": modalidad if modalidad else "Unknown"
             }
-            
-            collection.insert_one(documento)
-            count += 1
-        
-        print(f"✅ {count} manos sincronizadas a Cassandra")
+            # Ver si existe
+            existing = collection.find_one({"_id": doc_id})
+            if existing:
+                # Actualizar sin tocar _id
+                result = collection.update_one({"_id": doc_id}, {"$set": documento_base})
+                if result.modified_count:
+                    updated += 1
+            else:
+                documento_full = {"_id": doc_id, **documento_base}
+                collection.insert_one(documento_full)
+                inserted += 1
+        print(f"✅ Manos Cassandra: {inserted} nuevas, {updated} actualizadas, total leídas {len(manos)}")
         return True
     except Exception as e:
         print(f"❌ Error sincronizando manos: {e}")
@@ -914,30 +956,37 @@ def sync_transacciones_to_cassandra(pg_con, astra_db):
         
         collection = astra_db.get_collection("transacciones_por_usuario_fecha")
         
-        count = 0
+        inserted = 0
+        updated = 0
         for row in transacciones:
             id_trans, id_usuario, fecha_hora, monto, tipo, estado, medio = row
             if not fecha_hora:
-                fecha_hora = datetime.datetime.now()
-            
+                fecha_hora = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+            if fecha_hora.tzinfo is None:
+                fecha_hora = fecha_hora.replace(tzinfo=datetime.timezone.utc)
             fecha_str = fecha_hora.strftime("%Y-%m-%d")
-            
-            documento = {
-                "_id": f"{id_usuario}_{fecha_str}_{id_trans}",
+            fecha_iso = fecha_hora.astimezone(datetime.timezone.utc).isoformat()
+            doc_id = f"{id_usuario}_{fecha_str}_{id_trans}"
+            documento_base = {
                 "id_usuario": id_usuario,
                 "fecha": fecha_str,
                 "id_transaccion": id_trans,
-                "fecha_hora": fecha_hora,
+                "fecha_hora": fecha_iso,
                 "monto": float(monto) if monto else 0.0,
                 "tipo": tipo if tipo else "Unknown",
                 "medio": medio if medio else "Unknown",
                 "estado": estado if estado else "Unknown"
             }
-            
-            collection.insert_one(documento)
-            count += 1
-        
-        print(f"✅ {count} transacciones sincronizadas a Cassandra")
+            existing = collection.find_one({"_id": doc_id})
+            if existing:
+                result = collection.update_one({"_id": doc_id}, {"$set": documento_base})
+                if result.modified_count:
+                    updated += 1
+            else:
+                documento_full = {"_id": doc_id, **documento_base}
+                collection.insert_one(documento_full)
+                inserted += 1
+        print(f"✅ Transacciones Cassandra: {inserted} nuevas, {updated} actualizadas, total leídas {len(transacciones)}")
         return True
     except Exception as e:
         print(f"❌ Error sincronizando transacciones: {e}")
@@ -1094,6 +1143,7 @@ def caso9_usuarios_dos_mesas(pg_con, driver):
                 print(f"  Usuario {r['u.id_usuario']} ({r['u.nombre']}): {r['mesas_jugadas']} mesas")
         else:
             print("  (Sin datos)")
+
 def caso10_colusion(pg_con, driver):
     print("\n[Neo4j] 🚨 10. Detección de clusters de colusión (Top 5 pares)")
     
@@ -1104,7 +1154,8 @@ def caso10_colusion(pg_con, driver):
     # 2. Ejecutar consulta
     query = """
         MATCH (u1:Usuario)-[:JUGO_EN]->(m:Mesa)<-[:JUGO_EN]-(u2:Usuario)
-        WHERE id(u1) < id(u2)
+        // Usar propiedad propia para evitar warning de id() deprecado
+        WHERE u1.id_usuario < u2.id_usuario
         WITH u1, u2, count(m) as mesas_compartidas
         WHERE mesas_compartidas > 2
         RETURN u1.id_usuario, u1.nombre, u2.id_usuario, u2.nombre, mesas_compartidas
