@@ -235,7 +235,7 @@ def crear_transaccion(pg_con):
         cur.execute(f"UPDATE usuario SET saldo_real = saldo_real {op} %s WHERE id_usuario = %s RETURNING saldo_real;", (monto, id_usuario))
         pg_con.commit()
         cur.close()
-        print(f"✔️ Transacción {id_transaccion} creada en PostgreSQL.")
+        print(f"✔️  Transacción creada en PostgreSQL.")
         print("========================================================")
         
     except Exception as e:
@@ -729,8 +729,8 @@ def caso4_depositos_paypal(pg_con, db):
     # 3. Ejecutar consulta
     resultados = list(db.transacciones.find({
         "id_usuario": user_id,
-        "tipo": "deposito",
-        "medio": "paypal"
+        "tipo": "Deposito",
+        "medio": "Paypal"
     }))
     
     if resultados:
