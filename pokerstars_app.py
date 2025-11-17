@@ -3,6 +3,7 @@ import psycopg2
 from pymongo import MongoClient
 import redis
 from neo4j import GraphDatabase
+from astrapy import DataAPIClient
 from dotenv import load_dotenv
 import time
 import datetime
@@ -61,6 +62,29 @@ def get_neo4j_driver():
         return driver
     except Exception as e:
         print(f"❌ ERROR Neo4j: {e}")
+        return None
+
+def get_cassandra_session():
+    """Configuración para Astra DB usando DataAPIClient (astrapy)"""
+    try:
+        api_endpoint = os.getenv("ASTRA_DB_API_ENDPOINT")
+        token = os.getenv("ASTRA_DB_TOKEN")
+        
+        if not api_endpoint or not token:
+            raise ValueError("Faltan credenciales de Astra DB en .env")
+        
+        # Inicializar el cliente de Astra DB
+        client = DataAPIClient(token)
+        db = client.get_database_by_api_endpoint(api_endpoint)
+        
+        # Verificar conectividad
+        db.list_collection_names()
+        
+        print("✔️  Conexión a Cassandra (Astra) exitosa.")
+        return db
+            
+    except Exception as e:
+        print(f"❌ ERROR Cassandra: {e}")
         return None
 
 def ask(text):
@@ -488,37 +512,75 @@ def sync_usuario_to_mongo(pg_con, mongo_db, id_usuario):
         return False
 
 def sync_all_usuarios_to_mongo(pg_con, mongo_db):
-    """Sincroniza TODOS los usuarios a MongoDB (para casos de uso)"""
+    """Sincroniza TODOS los usuarios a MongoDB con balance_neto calculado"""
     print("🔄 Sincronizando usuarios desde PostgreSQL a MongoDB...")
     try:
         cur = pg_con.cursor()
-        cur.execute("""
-            SELECT u.id_usuario, u.nombre, u.email, u.pais, u.saldo_real, u.saldo_fichas
-            FROM usuario u
-        """)
         
+        # Obtener todos los usuarios
+        cur.execute("SELECT id_usuario, nombre, email, pais, saldo_real, saldo_fichas FROM usuario")
         usuarios = cur.fetchall()
-        cur.close()
         
         for row in usuarios:
+            id_usuario = row[0]
+            
+            # Calcular balance_neto: suma de depósitos menos retiros
+            cur.execute("""
+                SELECT 
+                    COALESCE(SUM(CASE WHEN tipo = 'deposito' THEN monto ELSE 0 END), 0) as depositos,
+                    COALESCE(SUM(CASE WHEN tipo = 'retiro' THEN monto ELSE 0 END), 0) as retiros
+                FROM transaccion
+                WHERE id_usuario = %s AND estado = 'completada'
+            """, (id_usuario,))
+            trans_result = cur.fetchone()
+            depositos = float(trans_result[0]) if trans_result[0] else 0.0
+            retiros = float(trans_result[1]) if trans_result[1] else 0.0
+            balance_neto = depositos - retiros
+            
+            # Calcular manos ganadas (suma de botes ganados menos rake)
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as manos_ganadas,
+                    COALESCE(SUM(bote_total - rake), 0) as ganancias_manos
+                FROM mano
+                WHERE ganador_id = %s
+            """, (id_usuario,))
+            manos_result = cur.fetchone()
+            manos_ganadas = int(manos_result[0]) if manos_result[0] else 0
+            ganancias_manos = float(manos_result[1]) if manos_result[1] else 0.0
+            
+            # Calcular total de manos jugadas
+            cur.execute("""
+                SELECT COUNT(DISTINCT m.id_mano)
+                FROM mano m
+                JOIN usuario_mano um ON m.id_mano = um.id_mano
+                WHERE um.id_usuario = %s
+            """, (id_usuario,))
+            manos_jugadas = cur.fetchone()[0] or 0
+            
+            # Crear documento para MongoDB
             usuario_doc = {
-                'id_usuario': row[0],
+                'id_usuario': id_usuario,
                 'nombre': row[1],
                 'email': row[2],
                 'pais': row[3],
                 'saldo_real': float(row[4]) if row[4] else 0.0,
                 'saldo_fichas': float(row[5]) if row[5] else 0.0,
-                'balance_neto': 0.0,
-                'manos_jugadas': 0
+                'balance_neto': balance_neto,  # Balance de transacciones
+                'ganancias_mesas': ganancias_manos,  # Ganancias por manos ganadas
+                'balance_total': balance_neto + ganancias_manos,  # Balance total combinado
+                'manos_jugadas': manos_jugadas,
+                'manos_ganadas': manos_ganadas
             }
             
             mongo_db.usuarios.update_one(
-                {'id_usuario': row[0]},
+                {'id_usuario': id_usuario},
                 {'$set': usuario_doc},
                 upsert=True
             )
         
-        print(f"✅ {len(usuarios)} usuarios sincronizados a MongoDB")
+        cur.close()
+        print(f"✅ {len(usuarios)} usuarios sincronizados a MongoDB con balance calculado")
         return True
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -686,13 +748,25 @@ def caso2_top10_balance(pg_con, db):
     print("🔄 Cargando datos desde PostgreSQL...")
     sync_all_usuarios_to_mongo(pg_con, db)
     
-    # 2. Ejecutar consulta en MongoDB
-    resultados = list(db.usuarios.find().sort("balance_neto", -1).limit(10))
+    # 2. Ejecutar consulta en MongoDB (ordenar por balance_total)
+    resultados = list(db.usuarios.find().sort("balance_total", -1).limit(10))
     
     if resultados:
-        print("\nTop 10:")
+        print("\nTop 10 por Balance Total (Transacciones + Ganancias Mesas):")
+        print("=" * 70)
         for i, user in enumerate(resultados, 1):
-            print(f"  {i}. {user['nombre']}: ${user.get('balance_neto', 0):.2f}")
+            balance_neto = user.get('balance_neto', 0)
+            ganancias = user.get('ganancias_mesas', 0)
+            balance_total = user.get('balance_total', 0)
+            manos_ganadas = user.get('manos_ganadas', 0)
+            manos_jugadas = user.get('manos_jugadas', 0)
+            
+            print(f"{i}. {user['nombre']}")
+            print(f"   Balance Total: ${balance_total:.2f}")
+            print(f"   - Transacciones (depósitos - retiros): ${balance_neto:.2f}")
+            print(f"   - Ganancias en mesas: ${ganancias:.2f}")
+            print(f"   - Manos: {manos_ganadas} ganadas / {manos_jugadas} jugadas")
+            print()
     else:
         print("  (Sin datos)")
 
@@ -743,55 +817,204 @@ def caso4_depositos_paypal(pg_con, db):
     else:
         print("  (Sin depósitos por PayPal)")
 
-def caso5_rake_por_mesa(pg_con, db):
-    print("\n[MongoDB] 💸 5. Análisis de rake generado por mesa")
-    
-    # 1. ETL bajo demanda
-    print("🔄 Cargando datos desde PostgreSQL...")
-    sync_manos_to_mongo(pg_con, db)
-    
-    # 2. Ejecutar consulta
-    pipeline = [
-        { "$group": {
-            "_id": "$id_mesa",
-            "rake_total": { "$sum": "$rake" },
-            "manos_jugadas": { "$count": {} }
-        }},
-        { "$sort": { "rake_total": -1 }},
-        { "$limit": 10 }
-    ]
-    resultados = list(db.manos.aggregate(pipeline))
-    
-    if resultados:
-        print("\nTop 10 mesas por rake:")
-        for r in resultados:
-            print(f"  Mesa {r['_id']}: ${r['rake_total']:.2f} rake, {r['manos_jugadas']} manos")
-    else:
-        print("  (Sin datos)")
+# ====================================
+#   LÓGICA DE CASSANDRA (Casos 5-6)
+#   Usando Astra DB REST API
+# ====================================
 
-def caso6_usuarios_por_pais(pg_con, db):
-    print("\n[MongoDB] 🌍 6. Distribución de usuarios por país")
+def crear_tablas_cassandra(astra_db):
+    """Crear colecciones en Astra DB usando astrapy"""
+    try:
+        # Crear colección para manos
+        try:
+            astra_db.create_collection("manos_por_fecha_mesa")
+            print("✅ Colección 'manos_por_fecha_mesa' creada.")
+        except Exception:
+            print("ℹ️  Colección 'manos_por_fecha_mesa' ya existe.")
+        
+        # Crear colección para transacciones
+        try:
+            astra_db.create_collection("transacciones_por_usuario_fecha")
+            print("✅ Colección 'transacciones_por_usuario_fecha' creada.")
+        except Exception:
+            print("ℹ️  Colección 'transacciones_por_usuario_fecha' ya existe.")
+        
+        return True
+    except Exception as e:
+        print(f"❌ Error al crear colecciones en Cassandra: {e}")
+        return False
+
+def sync_manos_to_cassandra(pg_con, astra_db):
+    """Sincroniza manos desde PostgreSQL a Cassandra usando astrapy"""
+    print("🔄 Sincronizando manos a Cassandra...")
+    try:
+        # Crear colecciones si no existen
+        crear_tablas_cassandra(astra_db)
+        
+        cur = pg_con.cursor()
+        cur.execute("""
+            SELECT m.id_mano, m.id_mesa, m.fecha_hora, m.bote_total, 
+                   m.rake, m.ganador_id, m.modalidad
+            FROM mano m
+            ORDER BY m.fecha_hora DESC
+        """)
+        
+        manos = cur.fetchall()
+        cur.close()
+        
+        collection = astra_db.get_collection("manos_por_fecha_mesa")
+        
+        count = 0
+        for row in manos:
+            id_mano, id_mesa, fecha_hora, bote_total, rake, ganador_id, modalidad = row
+            if not fecha_hora:
+                fecha_hora = datetime.datetime.now()
+            
+            fecha_str = fecha_hora.strftime("%Y-%m-%d")
+            
+            documento = {
+                "_id": f"{id_mesa}_{fecha_str}_{id_mano}",
+                "id_mesa": id_mesa,
+                "fecha": fecha_str,
+                "id_mano": id_mano,
+                "fecha_hora": fecha_hora,
+                "bote_total": float(bote_total) if bote_total else 0.0,
+                "rake": float(rake) if rake else 0.0,
+                "ganador_id": ganador_id if ganador_id else 0,
+                "modalidad": modalidad if modalidad else "Unknown"
+            }
+            
+            collection.insert_one(documento)
+            count += 1
+        
+        print(f"✅ {count} manos sincronizadas a Cassandra")
+        return True
+    except Exception as e:
+        print(f"❌ Error sincronizando manos: {e}")
+        return False
+
+def sync_transacciones_to_cassandra(pg_con, astra_db):
+    """Sincroniza transacciones desde PostgreSQL a Cassandra usando astrapy"""
+    print("🔄 Sincronizando transacciones a Cassandra...")
+    try:
+        # Crear colecciones si no existen
+        crear_tablas_cassandra(astra_db)
+        
+        cur = pg_con.cursor()
+        cur.execute("""
+            SELECT t.id_transaccion, t.id_usuario, t.fecha, t.monto, 
+                   t.tipo, t.estado, mp.tipo as medio
+            FROM transaccion t
+            JOIN metodo_pago mp ON t.id_metodo = mp.id_metodo
+            ORDER BY t.fecha DESC
+        """)
+        
+        transacciones = cur.fetchall()
+        cur.close()
+        
+        collection = astra_db.get_collection("transacciones_por_usuario_fecha")
+        
+        count = 0
+        for row in transacciones:
+            id_trans, id_usuario, fecha_hora, monto, tipo, estado, medio = row
+            if not fecha_hora:
+                fecha_hora = datetime.datetime.now()
+            
+            fecha_str = fecha_hora.strftime("%Y-%m-%d")
+            
+            documento = {
+                "_id": f"{id_usuario}_{fecha_str}_{id_trans}",
+                "id_usuario": id_usuario,
+                "fecha": fecha_str,
+                "id_transaccion": id_trans,
+                "fecha_hora": fecha_hora,
+                "monto": float(monto) if monto else 0.0,
+                "tipo": tipo if tipo else "Unknown",
+                "medio": medio if medio else "Unknown",
+                "estado": estado if estado else "Unknown"
+            }
+            
+            collection.insert_one(documento)
+            count += 1
+        
+        print(f"✅ {count} transacciones sincronizadas a Cassandra")
+        return True
+    except Exception as e:
+        print(f"❌ Error sincronizando transacciones: {e}")
+        return False
+
+def caso5_manos_por_fecha_mesa(pg_con, astra_db):
+    print("\n[Cassandra] 🃏 5. Manos por fecha y mesa")
     
     # 1. ETL bajo demanda
     print("🔄 Cargando datos desde PostgreSQL...")
-    sync_all_usuarios_to_mongo(pg_con, db)
+    sync_manos_to_cassandra(pg_con, astra_db)
     
-    # 2. Ejecutar consulta en MongoDB
-    pipeline = [
-        { "$group": {
-            "_id": "$pais",
-            "total_usuarios": { "$count": {} }
-        }},
-        { "$sort": { "total_usuarios": -1 }}
-    ]
-    resultados = list(db.usuarios.aggregate(pipeline))
+    # 2. Pedir datos
+    id_mesa = int(ask("ID Mesa"))
+    fecha_str = ask("Fecha (YYYY-MM-DD)")
     
-    if resultados:
-        print("\nDistribución por país:")
-        for r in resultados:
-            print(f"  {r['_id']}: {r['total_usuarios']} usuarios")
-    else:
-        print("  (Sin datos)")
+    # 3. Ejecutar consulta en Cassandra usando astrapy
+    try:
+        collection = astra_db.get_collection("manos_por_fecha_mesa")
+        resultados = list(collection.find({"id_mesa": id_mesa, "fecha": fecha_str}))
+        
+        if resultados:
+            print(f"\nManos en mesa {id_mesa} el {fecha_str}:")
+            for m in resultados:
+                hora = m.get('fecha_hora', 'N/A')
+                print(f"  Mano {m.get('id_mano')} - {hora}")
+                print(f"    Bote: ${m.get('bote_total', 0):.2f} | Rake: ${m.get('rake', 0):.2f}")
+                print(f"    Ganador: Usuario {m.get('ganador_id')} | Modalidad: {m.get('modalidad')}")
+            print(f"\nTotal: {len(resultados)} manos")
+        else:
+            print("  (Sin datos)")
+    except Exception as e:
+        print(f"❌ Error en consulta: {e}")
+
+def caso6_transacciones_por_usuario_fecha(pg_con, astra_db):
+    print("\n[Cassandra] 💳 6. Transacciones por usuario y fecha")
+    
+    # 1. ETL bajo demanda
+    print("🔄 Cargando datos desde PostgreSQL...")
+    sync_transacciones_to_cassandra(pg_con, astra_db)
+    
+    # 2. Pedir datos
+    id_usuario = int(ask("ID Usuario"))
+    fecha_str = ask("Fecha (YYYY-MM-DD)")
+    
+    # 3. Ejecutar consulta en Cassandra usando astrapy
+    try:
+        collection = astra_db.get_collection("transacciones_por_usuario_fecha")
+        resultados = list(collection.find({"id_usuario": id_usuario, "fecha": fecha_str}))
+        
+        if resultados:
+            print(f"\nTransacciones de usuario {id_usuario} el {fecha_str}:")
+            total_depositos = 0
+            total_retiros = 0
+            
+            for t in resultados:
+                hora = t.get('fecha_hora', 'N/A')
+                monto = t.get('monto', 0)
+                tipo = t.get('tipo', '')
+                
+                print(f"  Trans {t.get('id_transaccion')} - {hora}")
+                print(f"    Tipo: {tipo} | Monto: ${monto:.2f}")
+                print(f"    Medio: {t.get('medio')} | Estado: {t.get('estado')}")
+                
+                if tipo.lower() == 'deposito':
+                    total_depositos += monto
+                else:
+                    total_retiros += monto
+            
+            print(f"\nResumen:")
+            print(f"  Total transacciones: {len(resultados)}")
+            print(f"  Depósitos: ${total_depositos:.2f}")
+            print(f"  Retiros: ${total_retiros:.2f}")
+        else:
+            print("  (Sin datos)")
+    except Exception as e:
+        print(f"❌ Error en consulta: {e}")
 
 # ====================================
 #   3. LÓGICA DE REDIS (Casos 7-8)
@@ -911,9 +1134,10 @@ def main():
     mongo_db = get_mongo_client()
     redis_con = get_redis()
     neo4j_driver = get_neo4j_driver()
+    astra_db = get_cassandra_session()
     
     # Validar conexiones (mongo_db no puede usarse con bool directamente)
-    if pg_con is None or mongo_db is None or redis_con is None or neo4j_driver is None:
+    if pg_con is None or mongo_db is None or redis_con is None or neo4j_driver is None or astra_db is None:
         print("Faltan conexiones de base de datos. Saliendo.")
         return
 
@@ -935,9 +1159,10 @@ def main():
         print("9. Simular Jugador juega una mano (Redis)")
         print("")
         print("--- Lectura (Casos de Uso NoSQL) ---")
-        print("m. Ver Casos de Uso (MongoDB)")
-        print("r. Ver Casos de Uso (Redis)")
-        print("n. Ver Casos de Uso (Neo4j)")
+        print("m. Ver Casos de Uso (MongoDB 1-4)")
+        print("c. Ver Casos de Uso (Cassandra 5-6)")
+        print("r. Ver Casos de Uso (Redis 7-8)")
+        print("n. Ver Casos de Uso (Neo4j 9-10)")
         print("s. Salir")
         print("===================================")
         print("")
@@ -966,16 +1191,22 @@ def main():
                 simular_juego(redis_con)
             
             elif op == 'm':
-                if mongo_db:
-                    print("\n--- Casos de Uso MongoDB ---")
+                if mongo_db is not None:
+                    print("\n--- Casos de Uso MongoDB (1-4) ---")
                     caso1_volumen_modalidad(pg_con, mongo_db)
                     caso2_top10_balance(pg_con, mongo_db)
                     caso3_manos_1000_septiembre(pg_con, mongo_db)
                     caso4_depositos_paypal(pg_con, mongo_db)
-                    caso5_rake_por_mesa(pg_con, mongo_db)
-                    caso6_usuarios_por_pais(pg_con, mongo_db)
                 else:
                     print("❌ MongoDB no disponible")
+            
+            elif op == 'c':
+                if astra_db is not None:
+                    print("\n--- Casos de Uso Cassandra (5-6) ---")
+                    caso5_manos_por_fecha_mesa(pg_con, astra_db)
+                    caso6_transacciones_por_usuario_fecha(pg_con, astra_db)
+                else:
+                    print("❌ Cassandra no disponible")
             
             elif op == 'r':
                 print("\n--- Casos de Uso Redis ---")
@@ -983,7 +1214,7 @@ def main():
                 caso8_balance_cache(redis_con, pg_con)
 
             elif op == 'n':
-                if neo4j_driver:
+                if neo4j_driver is not None:
                     print("\n--- Casos de Uso Neo4j ---")
                     caso9_usuarios_dos_mesas(pg_con, neo4j_driver)
                     caso10_colusion(pg_con, neo4j_driver)
@@ -994,6 +1225,7 @@ def main():
                 print("Cerrando todas las conexiones...")
                 pg_con.close()
                 neo4j_driver.close()
+                # Cassandra REST API no requiere cierre explícito
                 # Mongo y Redis no requieren cierre explícito de la misma forma
                 break
             else:
