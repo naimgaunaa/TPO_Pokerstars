@@ -17,10 +17,21 @@ def get_postgres():
         if not db_url:
             raise ValueError("No se encontró DATABASE_PUBLIC_URL ni DATABASE_URL en .env")
         conn = psycopg2.connect(db_url)
+        conn.autocommit = False  # Modo transaccional explícito
+        
+        # Verificar conexión ejecutando una query simple
+        cur = conn.cursor()
+        cur.execute("SELECT version();")
+        version = cur.fetchone()[0]
+        cur.close()
+        
         print("✔️  Conexión a PostgreSQL (Railway) exitosa.")
+        print(f"    PostgreSQL version: {version[:50]}...")
         return conn
     except Exception as e:
         print(f"❌ ERROR PostgreSQL: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # MongoDB Atlas devuelve la base de datos 'pokerstars'
@@ -88,6 +99,57 @@ def get_cassandra_session():
 
 def ask(text):
     return input(text + ": ").strip()
+
+def verificar_estado_postgres(pg_con):
+    """Función de diagnóstico para verificar el estado de PostgreSQL"""
+    print("\n===================================")
+    print("📊 DIAGNÓSTICO DE POSTGRESQL")
+    print("===================================")
+    
+    try:
+        cur = pg_con.cursor()
+        
+        # 1. Verificar conexión
+        cur.execute("SELECT current_database(), current_user;")
+        db_name, user = cur.fetchone()
+        print(f"✅ Base de datos: {db_name}")
+        print(f"✅ Usuario: {user}")
+        
+        # 2. Listar tablas existentes
+        cur.execute("""
+            SELECT tablename 
+            FROM pg_tables 
+            WHERE schemaname = 'public' 
+            ORDER BY tablename;
+        """)
+        tablas = cur.fetchall()
+        
+        if tablas:
+            print(f"\n📋 Tablas existentes ({len(tablas)}):")
+            for tabla in tablas:
+                # Contar registros en cada tabla
+                cur.execute(f"SELECT COUNT(*) FROM {tabla[0]};")
+                count = cur.fetchone()[0]
+                print(f"   - {tabla[0]}: {count} registros")
+        else:
+            print("\n⚠️  No hay tablas en el esquema public")
+        
+        # 3. Verificar estado de la transacción
+        cur.execute("SELECT txid_current_if_assigned();")
+        txid = cur.fetchone()[0]
+        if txid:
+            print(f"\n⚠️  Hay una transacción activa (ID: {txid})")
+        else:
+            print(f"\n✅ No hay transacciones pendientes")
+        
+        cur.close()
+        print("===================================\n")
+        
+    except Exception as e:
+        print(f"❌ Error en diagnóstico: {e}")
+        import traceback
+        traceback.print_exc()
+        print("===================================\n")
 
 # ======================================
 #    LÓGICA DE POSTGRESQL (Master DB)
@@ -227,12 +289,16 @@ def crear_usuario(pg_con):
         pg_con.commit()
         cur.close()
         print(f"✔️ Usuario {id_usuario} creado en PostgreSQL.")
+        print(f"   ✅ COMMIT realizado exitosamente")
         print("===================================")
         
     except Exception as e:
         print(f"❌ Error al crear usuario: {e}")
+        print("   🔄 Haciendo ROLLBACK...")
         print("===================================")
         pg_con.rollback()
+        import traceback
+        traceback.print_exc()
 
 def crear_transaccion(pg_con):
     print("========================================================")
@@ -1195,6 +1261,7 @@ def main():
         print("       POKERSTARS DATA MANAGER")
         print("===================================")
         print("--- Admin (PostgreSQL) ---")
+        print("0. Verificar Estado de PostgreSQL 🔍")
         print("1. Crear Tablas en PostgreSQL")
         print("")
         print("--- Escritura (PostgreSQL) ---")
@@ -1220,7 +1287,9 @@ def main():
         print("")
 
         try:
-            if op == '1':
+            if op == '0':
+                verificar_estado_postgres(pg_con)
+            elif op == '1':
                 crear_tablas_postgres(pg_con)
             elif op == '2':
                 crear_usuario(pg_con)
