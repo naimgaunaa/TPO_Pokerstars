@@ -922,9 +922,8 @@ def sync_manos_to_cassandra(pg_con, astra_db):
             existing = collection.find_one({"_id": doc_id})
             if existing:
                 # Actualizar sin tocar _id
-                result = collection.update_one({"_id": doc_id}, {"$set": documento_base})
-                if result.modified_count:
-                    updated += 1
+                collection.update_one({"_id": doc_id}, {"$set": documento_base})
+                updated += 1
             else:
                 documento_full = {"_id": doc_id, **documento_base}
                 collection.insert_one(documento_full)
@@ -979,9 +978,8 @@ def sync_transacciones_to_cassandra(pg_con, astra_db):
             }
             existing = collection.find_one({"_id": doc_id})
             if existing:
-                result = collection.update_one({"_id": doc_id}, {"$set": documento_base})
-                if result.modified_count:
-                    updated += 1
+                collection.update_one({"_id": doc_id}, {"$set": documento_base})
+                updated += 1
             else:
                 documento_full = {"_id": doc_id, **documento_base}
                 collection.insert_one(documento_full)
